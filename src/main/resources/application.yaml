@@ -1,0 +1,105 @@
+# Application Configuration
+
+# Server Configuration
+server:
+  port: 8080
+  servlet:
+    context-path: /dbscanner
+
+# Spring Configuration
+spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.data.jdbc.JdbcRepositoriesAutoConfiguration
+      - org.springframework.boot.autoconfigure.http.client.HttpClientAutoConfiguration
+  application:
+    name: privsense
+  jackson:
+    default-property-inclusion: non_null
+  # Cache Configuration
+  cache:
+    type: caffeine
+    cache-names: tableMetadata,columnMetadata,piiResults
+    caffeine:
+      spec: maximumSize=1000,expireAfterWrite=60m
+
+# Database Scanner Configuration
+dbscanner:
+  drivers:
+    directory: ${user.home}/.dbscanner/drivers
+    repository-url: https://repo1.maven.org/maven2
+    coordinates:
+      oracle.jdbc.OracleDriver: com.oracle.database.jdbc:ojdbc8:23.3.0
+      com.mysql.cj.jdbc.Driver: mysql:mysql-connector-java:8.0.33
+      org.postgresql.Driver: org.postgresql:postgresql:42.7.1
+  threads:
+    max-pool-size: 10
+  queue:
+    batch-size: 20
+  sampling:
+    parallel-enabled: true
+    timeout: 30
+    timeout-unit: SECONDS
+
+# PII Detector Configuration
+piidetector:
+  threads:
+    max-pool-size: 10
+  sampling:
+    limit: 10
+  confidence:
+    threshold: 0.55
+  ner:
+    service:
+      url: https://021b-34-74-84-228.ngrok-free.app/ner
+      timeout: 30
+  strategy:
+    heuristic:
+      enabled: true
+    regex:
+      enabled: true
+    ner:
+      enabled: true
+    composite:
+      enabled: true
+
+# Logging Configuration
+logging:
+  level:
+    root: INFO
+    com.cgi.privsense.dbscanner: DEBUG
+    com.cgi.privsense.piidetector: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+  file:
+    name: logs/privsense.log
+    max-size: 10MB
+    max-history: 10
+
+# Swagger/OpenAPI Configuration
+springdoc:
+  api-docs:
+    path: /api-docs
+    enabled: true
+  swagger-ui:
+    path: /swagger-ui.html
+    operationsSorter: method
+    tagsSorter: alpha
+    filter: true
+    disable-swagger-default-url: true
+    display-request-duration: true
+  packages-to-scan: com.cgi.privsense.dbscanner.api,com.cgi.privsense.piidetector.api
+  show-actuator: false
+
+# Management endpoints
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when_authorized
+  health:
+    defaults:
+      enabled: true
