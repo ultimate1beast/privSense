@@ -3,20 +3,25 @@ package com.cgi.privsense.dbscanner.service;
 import com.cgi.privsense.dbscanner.core.datasource.DataSourceProvider;
 import com.cgi.privsense.dbscanner.exception.SamplingException;
 import com.cgi.privsense.dbscanner.model.DataSample;
+import com.cgi.privsense.dbscanner.service.queue.SamplingTask;
+import com.cgi.privsense.dbscanner.service.queue.SamplingTaskProcessor;
+import com.cgi.privsense.dbscanner.service.queue.SamplingTaskQueue;
+
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StopWatch;
 
 import javax.sql.DataSource;
 import java.sql.*;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.function.Function;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 /**
  * Service for parallel sampling of database data.
- * Optimized to use direct JDBC connections for maximum performance.
+ * Optimized to use producer-consumer pattern with queues for better resource utilization.
  */
 @Slf4j
 @Service
@@ -28,7 +33,7 @@ public class OptimizedParallelSamplingService {
     private final DataSourceProvider dataSourceProvider;
 
     /**
-     * Maximum number of threads in the pool.
+     * Maximum number of threads in the direct pool.
      */
     private final int maxThreads;
 
@@ -43,24 +48,50 @@ public class OptimizedParallelSamplingService {
     private final TimeUnit timeoutUnit;
 
     /**
+     * Sampling task queue.
+     */
+    private final SamplingTaskQueue taskQueue;
+
+    /**
+     * Sampling task processor.
+     */
+    private final SamplingTaskProcessor taskProcessor;
+
+    /**
+     * Whether to use the queue for sampling.
+     */
+    private final boolean useQueueForSampling;
+
+    /**
      * Constructor.
      *
      * @param dataSourceProvider Provider for data sources
+     * @param taskQueue Sampling task queue
+     * @param taskProcessor Sampling task processor
      * @param maxThreads Maximum number of threads
      * @param defaultTimeout Default timeout
      * @param timeoutUnit Timeout unit
+     * @param useQueueForSampling Whether to use the queue for sampling
      */
     public OptimizedParallelSamplingService(
             DataSourceProvider dataSourceProvider,
+            SamplingTaskQueue taskQueue,
+            SamplingTaskProcessor taskProcessor,
             @Value("${dbscanner.threads.max-pool-size:#{T(java.lang.Runtime).getRuntime().availableProcessors()}}") int maxThreads,
             @Value("${dbscanner.sampling.timeout:30}") long defaultTimeout,
-            @Value("${dbscanner.sampling.timeout-unit:SECONDS}") TimeUnit timeoutUnit) {
+            @Value("${dbscanner.sampling.timeout-unit:SECONDS}") TimeUnit timeoutUnit,
+            @Value("${dbscanner.sampling.use-queue:true}") boolean useQueueForSampling) {
+
         this.dataSourceProvider = dataSourceProvider;
+        this.taskQueue = taskQueue;
+        this.taskProcessor = taskProcessor;
         this.maxThreads = maxThreads;
         this.defaultTimeout = defaultTimeout;
         this.timeoutUnit = timeoutUnit;
+        this.useQueueForSampling = useQueueForSampling;
 
-        log.info("Initialized parallel sampling service with {} threads", maxThreads);
+        log.info("Initialized parallel sampling service with {} threads, using queue: {}",
+                maxThreads, useQueueForSampling);
     }
 
     /**
@@ -73,6 +104,9 @@ public class OptimizedParallelSamplingService {
      * @return Data sample
      */
     public DataSample sampleTable(String dbType, String connectionId, String tableName, int limit) {
+        StopWatch watch = new StopWatch();
+        watch.start();
+
         DataSource dataSource = dataSourceProvider.getDataSource(connectionId);
 
         try (Connection conn = dataSource.getConnection();
@@ -83,11 +117,12 @@ public class OptimizedParallelSamplingService {
             List<Map<String, Object>> rows = new ArrayList<>();
 
             try (ResultSet rs = stmt.executeQuery()) {
-                int columnCount = rs.getMetaData().getColumnCount();
+                ResultSetMetaData metaData = rs.getMetaData();
+                int columnCount = metaData.getColumnCount();
                 while (rs.next()) {
                     Map<String, Object> row = new HashMap<>();
                     for (int i = 1; i <= columnCount; i++) {
-                        String columnName = rs.getMetaData().getColumnName(i);
+                        String columnName = metaData.getColumnName(i);
                         Object value = rs.getObject(i);
                         row.put(columnName, value);
                     }
@@ -95,6 +130,8 @@ public class OptimizedParallelSamplingService {
                 }
             }
 
+            watch.stop();
+            log.debug("Sampled table {} in {} ms", tableName, watch.getTotalTimeMillis());
             return DataSample.fromRows(tableName, rows);
         } catch (SQLException e) {
             throw new SamplingException("Error sampling table: " + tableName, e);
@@ -112,6 +149,9 @@ public class OptimizedParallelSamplingService {
      * @return List of sampled values
      */
     public List<Object> sampleColumn(String dbType, String connectionId, String tableName, String columnName, int limit) {
+        StopWatch watch = new StopWatch();
+        watch.start();
+
         DataSource dataSource = dataSourceProvider.getDataSource(connectionId);
 
         try (Connection conn = dataSource.getConnection();
@@ -128,6 +168,8 @@ public class OptimizedParallelSamplingService {
                 }
             }
 
+            watch.stop();
+            log.debug("Sampled column {}.{} in {} ms", tableName, columnName, watch.getTotalTimeMillis());
             return values;
         } catch (SQLException e) {
             throw new SamplingException("Error sampling column: " + tableName + "." + columnName, e);
@@ -146,6 +188,9 @@ public class OptimizedParallelSamplingService {
      */
     public Map<String, List<Object>> sampleColumnsInParallel(String dbType, String connectionId,
                                                              String tableName, List<String> columnNames, int limit) {
+        StopWatch watch = new StopWatch();
+        watch.start();
+
         // First, validate that columns exist in the table
         DataSource dataSource = dataSourceProvider.getDataSource(connectionId);
         List<String> existingColumns = new ArrayList<>();
@@ -191,9 +236,139 @@ public class OptimizedParallelSamplingService {
 
         // For a small number of columns, use a single query
         if (existingColumns.size() <= 3) {
-            return sampleColumnsWithSingleQuery(dbType, connectionId, tableName, existingColumns, limit);
+            Map<String, List<Object>> result = sampleColumnsWithSingleQuery(dbType, connectionId, tableName, existingColumns, limit);
+            watch.stop();
+            log.debug("Sampled {} columns with single query in {} ms", existingColumns.size(), watch.getTotalTimeMillis());
+            return result;
         } else {
-            return sampleColumnsWithParallelism(dbType, connectionId, tableName, existingColumns, limit);
+            // Choose approach based on configuration
+            if (useQueueForSampling) {
+                Map<String, List<Object>> result = sampleColumnsWithQueue(dbType, connectionId, tableName, existingColumns, limit);
+                watch.stop();
+                log.debug("Sampled {} columns with queue in {} ms", existingColumns.size(), watch.getTotalTimeMillis());
+                return result;
+            } else {
+                Map<String, List<Object>> result = sampleColumnsWithDirectParallelism(dbType, connectionId, tableName, existingColumns, limit);
+                watch.stop();
+                log.debug("Sampled {} columns with direct parallelism in {} ms", existingColumns.size(), watch.getTotalTimeMillis());
+                return result;
+            }
+        }
+    }
+
+    /**
+     * Samples data from multiple columns using the queue.
+     *
+     * @param dbType Database type
+     * @param connectionId Connection ID
+     * @param tableName Table name
+     * @param columnNames List of column names
+     * @param limit Maximum number of rows
+     * @return Map of column name to list of sampled values
+     */
+    private Map<String, List<Object>> sampleColumnsWithQueue(String dbType, String connectionId,
+                                                             String tableName, List<String> columnNames, int limit) {
+        Map<String, List<Object>> results = new ConcurrentHashMap<>();
+        CountDownLatch completionLatch = new CountDownLatch(columnNames.size());
+
+        try {
+            // Signal start of producing tasks
+            taskQueue.startProducing();
+
+            try {
+                // Create tasks for all columns
+                for (String columnName : columnNames) {
+                    // Create completion callback
+                    Consumer<List<Object>> callback = samples -> {
+                        results.put(columnName, samples);
+                        completionLatch.countDown();
+                    };
+
+                    // Create and submit task
+                    SamplingTask task = new SamplingTask(
+                            dbType, connectionId, tableName, columnName, limit, callback);
+
+                    taskQueue.addTask(task);
+                }
+            } finally {
+                // Signal end of producing tasks
+                taskQueue.finishProducing();
+            }
+
+            // Wait for all tasks to complete
+            if (!completionLatch.await(defaultTimeout, timeoutUnit)) {
+                log.warn("Timeout waiting for column sampling tasks to complete");
+            }
+
+            return results;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.error("Interrupted while sampling columns", e);
+            return results; // Return partial results
+        }
+    }
+
+    /**
+     * Samples data from multiple columns with parallel queries using a direct thread pool.
+     *
+     * @param dbType Database type
+     * @param connectionId Connection ID
+     * @param tableName Table name
+     * @param columnNames List of column names
+     * @param limit Maximum number of values per column
+     * @return Map of column name to list of sampled values
+     */
+    private Map<String, List<Object>> sampleColumnsWithDirectParallelism(String dbType, String connectionId,
+                                                                         String tableName, List<String> columnNames, int limit) {
+        // Calculate optimal number of threads
+        int numThreads = Math.min(columnNames.size(), maxThreads);
+        ExecutorService executor = Executors.newFixedThreadPool(numThreads, r -> {
+            Thread t = new Thread(r);
+            t.setName("direct-sampler-" + t.getId());
+            t.setDaemon(true);
+            return t;
+        });
+
+        try {
+            // Submit a task for each column
+            List<Future<Map.Entry<String, List<Object>>>> futures = new ArrayList<>();
+
+            for (String columnName : columnNames) {
+                futures.add(executor.submit(() -> {
+                    // Get a connection from the pool
+                    List<Object> values = sampleColumn(dbType, connectionId, tableName, columnName, limit);
+                    return Map.entry(columnName, values);
+                }));
+            }
+
+            // Collect results
+            Map<String, List<Object>> results = new ConcurrentHashMap<>();
+            for (Future<Map.Entry<String, List<Object>>> future : futures) {
+                try {
+                    Map.Entry<String, List<Object>> entry = future.get(defaultTimeout, timeoutUnit);
+                    results.put(entry.getKey(), entry.getValue());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    log.error("Interrupted while sampling columns", e);
+                } catch (ExecutionException e) {
+                    log.error("Error sampling column: {}", e.getCause().getMessage(), e.getCause());
+                } catch (TimeoutException e) {
+                    log.error("Timeout sampling column", e);
+                }
+            }
+
+            return results;
+        } finally {
+            // Shutdown the executor service
+            executor.shutdown();
+            try {
+                if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    executor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                executor.shutdownNow();
+            }
         }
     }
 
@@ -231,8 +406,9 @@ public class OptimizedParallelSamplingService {
             try (ResultSet rs = stmt.executeQuery()) {
                 // Create a mapping of column names to their indices
                 Map<String, Integer> columnIndices = new HashMap<>();
-                for (int i = 1; i <= rs.getMetaData().getColumnCount(); i++) {
-                    String columnLabel = rs.getMetaData().getColumnLabel(i);
+                ResultSetMetaData metaData = rs.getMetaData();
+                for (int i = 1; i <= metaData.getColumnCount(); i++) {
+                    String columnLabel = metaData.getColumnLabel(i);
                     // Remove any backticks or other database-specific quoting
                     String cleanColumnName = columnLabel.replaceAll("[`\"\\[\\]]", "");
                     log.debug("Column at index {}: label='{}', clean name='{}'", i, columnLabel, cleanColumnName);
@@ -274,56 +450,6 @@ public class OptimizedParallelSamplingService {
     }
 
     /**
-     * Samples data from multiple columns with parallel queries.
-     *
-     * @param dbType Database type
-     * @param connectionId Connection ID
-     * @param tableName Table name
-     * @param columnNames List of column names
-     * @param limit Maximum number of values per column
-     * @return Map of column name to list of sampled values
-     */
-    private Map<String, List<Object>> sampleColumnsWithParallelism(String dbType, String connectionId,
-                                                                   String tableName, List<String> columnNames, int limit) {
-        // Calculate optimal number of threads
-        int numThreads = Math.min(columnNames.size(), maxThreads);
-        ExecutorService executor = Executors.newFixedThreadPool(numThreads);
-
-        try {
-            // Submit a task for each column
-            List<Future<Map.Entry<String, List<Object>>>> futures = new ArrayList<>();
-
-            for (String columnName : columnNames) {
-                futures.add(executor.submit(() -> {
-                    // Get a connection from the pool
-                    List<Object> values = sampleColumn(dbType, connectionId, tableName, columnName, limit);
-                    return Map.entry(columnName, values);
-                }));
-            }
-
-            // Collect results
-            Map<String, List<Object>> results = new ConcurrentHashMap<>();
-            for (Future<Map.Entry<String, List<Object>>> future : futures) {
-                try {
-                    Map.Entry<String, List<Object>> entry = future.get(defaultTimeout, timeoutUnit);
-                    results.put(entry.getKey(), entry.getValue());
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    log.error("Interrupted while sampling columns", e);
-                } catch (ExecutionException e) {
-                    log.error("Error sampling column: {}", e.getCause().getMessage(), e.getCause());
-                } catch (TimeoutException e) {
-                    log.error("Timeout sampling column", e);
-                }
-            }
-
-            return results;
-        } finally {
-            executor.shutdownNow();
-        }
-    }
-
-    /**
      * Samples data from multiple tables in parallel.
      *
      * @param dbType Database type
@@ -334,9 +460,93 @@ public class OptimizedParallelSamplingService {
      */
     public Map<String, DataSample> sampleTablesInParallel(String dbType, String connectionId,
                                                           List<String> tableNames, int limit) {
+        StopWatch watch = new StopWatch();
+        watch.start();
+
+        // Choose approach based on configuration
+        if (useQueueForSampling) {
+            Map<String, DataSample> result = sampleTablesWithQueue(dbType, connectionId, tableNames, limit);
+            watch.stop();
+            log.debug("Sampled {} tables with queue in {} ms", tableNames.size(), watch.getTotalTimeMillis());
+            return result;
+        } else {
+            Map<String, DataSample> result = sampleTablesWithDirectParallelism(dbType, connectionId, tableNames, limit);
+            watch.stop();
+            log.debug("Sampled {} tables with direct parallelism in {} ms", tableNames.size(), watch.getTotalTimeMillis());
+            return result;
+        }
+    }
+
+    /**
+     * Samples data from multiple tables using the queue.
+     *
+     * @param dbType Database type
+     * @param connectionId Connection ID
+     * @param tableNames List of table names
+     * @param limit Maximum number of rows
+     * @return Map of table name to data sample
+     */
+    private Map<String, DataSample> sampleTablesWithQueue(String dbType, String connectionId,
+                                                          List<String> tableNames, int limit) {
+        Map<String, DataSample> results = new ConcurrentHashMap<>();
+        CountDownLatch completionLatch = new CountDownLatch(tableNames.size());
+
+        try {
+            // Signal start of producing tasks
+            taskQueue.startProducing();
+
+            try {
+                // Create tasks for all tables
+                for (String tableName : tableNames) {
+                    // Create completion callback
+                    Consumer<DataSample> callback = sample -> {
+                        results.put(tableName, sample);
+                        completionLatch.countDown();
+                    };
+
+                    // Create and submit task
+                    SamplingTask task = new SamplingTask(
+                            dbType, connectionId, tableName, limit, callback);
+
+                    taskQueue.addTask(task);
+                }
+            } finally {
+                // Signal end of producing tasks
+                taskQueue.finishProducing();
+            }
+
+            // Wait for all tasks to complete
+            if (!completionLatch.await(defaultTimeout, timeoutUnit)) {
+                log.warn("Timeout waiting for table sampling tasks to complete");
+            }
+
+            return results;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.error("Interrupted while sampling tables", e);
+            return results; // Return partial results
+        }
+    }
+
+    /**
+     * Samples data from multiple tables with direct parallel queries.
+     *
+     * @param dbType Database type
+     * @param connectionId Connection ID
+     * @param tableNames List of table names
+     * @param limit Maximum number of rows per table
+     * @return Map of table name to data sample
+     */
+    private Map<String, DataSample> sampleTablesWithDirectParallelism(String dbType, String connectionId,
+                                                                      List<String> tableNames, int limit) {
         // Calculate optimal number of threads
         int numThreads = Math.min(tableNames.size(), maxThreads);
-        ExecutorService executor = Executors.newFixedThreadPool(numThreads);
+        ExecutorService executor = Executors.newFixedThreadPool(numThreads, r -> {
+            Thread t = new Thread(r);
+            t.setName("direct-table-sampler-" + t.getId());
+            t.setDaemon(true);
+            return t;
+        });
 
         try {
             // Submit a task for each table
@@ -367,7 +577,16 @@ public class OptimizedParallelSamplingService {
 
             return results;
         } finally {
-            executor.shutdownNow();
+            // Shutdown the executor service
+            executor.shutdown();
+            try {
+                if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    executor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                executor.shutdownNow();
+            }
         }
     }
 

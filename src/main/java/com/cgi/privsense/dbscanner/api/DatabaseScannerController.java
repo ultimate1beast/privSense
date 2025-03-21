@@ -92,32 +92,25 @@ public class DatabaseScannerController {
     public ResponseEntity<ApiResponse<String>> deleteConnection(@PathVariable String connectionId) {
         logger.info("Deleting connection: {}", connectionId);
 
-        try {
-            // Validate that the connection exists
-            if (!dataSourceProvider.hasDataSource(connectionId)) {
-                logger.warn("Connection not found: {}", connectionId);
-                return ResponseEntity
-                        .status(HttpStatus.NOT_FOUND)
-                        .body(ApiResponse.error("Connection not found: " + connectionId));
-            }
+        // Validate that the connection exists
+        if (!dataSourceProvider.hasDataSource(connectionId)) {
+            logger.warn("Connection not found: {}", connectionId);
+            return ResponseEntity
+                    .status(HttpStatus.NOT_FOUND)
+                    .body(ApiResponse.error("Connection not found: " + connectionId));
+        }
 
-            // Remove the connection
-            boolean success = dataSourceProvider.removeDataSource(connectionId);
+        // Remove the connection
+        boolean success = dataSourceProvider.removeDataSource(connectionId);
 
-            if (success) {
-                logger.info("Connection deleted successfully: {}", connectionId);
-                return ResponseEntity.ok(ApiResponse.success("Connection deleted: " + connectionId));
-            } else {
-                logger.error("Failed to delete connection: {}", connectionId);
-                return ResponseEntity
-                        .status(HttpStatus.INTERNAL_SERVER_ERROR)
-                        .body(ApiResponse.error("Failed to delete connection: " + connectionId));
-            }
-        } catch (Exception e) {
-            logger.error("Error deleting connection: {}", connectionId, e);
+        if (success) {
+            logger.info("Connection deleted successfully: {}", connectionId);
+            return ResponseEntity.ok(ApiResponse.success("Connection deleted: " + connectionId));
+        } else {
+            logger.error("Failed to delete connection: {}", connectionId);
             return ResponseEntity
                     .status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(ApiResponse.error("Error deleting connection: " + e.getMessage()));
+                    .body(ApiResponse.error("Failed to delete connection: " + connectionId));
         }
     }
 
@@ -126,18 +119,9 @@ public class DatabaseScannerController {
     public ResponseEntity<ApiResponse<List<Map<String, Object>>>> listConnections() {
         logger.info("Listing all connections");
 
-        try {
-            List<Map<String, Object>> connections = dataSourceProvider.getDataSourcesInfo();
-            return ResponseEntity.ok(ApiResponse.success(connections));
-        } catch (Exception e) {
-            logger.error("Error listing connections", e);
-            return ResponseEntity
-                    .status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(ApiResponse.error("Error listing connections: " + e.getMessage()));
-        }
+        List<Map<String, Object>> connections = dataSourceProvider.getDataSourcesInfo();
+        return ResponseEntity.ok(ApiResponse.success(connections));
     }
-
-
 
 
     // === Scanning operations ===
@@ -223,7 +207,7 @@ public class DatabaseScannerController {
             @RequestParam(defaultValue = "10") int limit,
             @RequestBody SamplingRequest request) {
 
-        // Valider la requête
+        // Validate the request
         if (request == null || request.getItems() == null || request.getItems().isEmpty()) {
             return ResponseEntity
                     .badRequest()
@@ -234,25 +218,18 @@ public class DatabaseScannerController {
         logger.info("Sampling multiple columns in parallel from table: {}, connection: {}, db type: {}, limit: {}, columns: {}",
                 tableName, connectionId, actualDbType, limit, String.join(", ", request.getItems()));
 
-        try {
-            Map<String, List<Object>> samples = samplingService.sampleColumnsInParallel(
-                    actualDbType, connectionId, tableName, request.getItems(), limit);
+        Map<String, List<Object>> samples = samplingService.sampleColumnsInParallel(
+                actualDbType, connectionId, tableName, request.getItems(), limit);
 
-            if (samples.isEmpty()) {
-                // Créer une map vide du bon type
-                Map<String, List<Object>> emptyResult = new HashMap<>();
-                // Ajouter un message dans les logs, mais retourner la map vide
-                logger.warn("None of the requested columns could be found in table {}", tableName);
-                return ResponseEntity.ok(ApiResponse.success(emptyResult));
-            }
-
-            return ResponseEntity.ok(ApiResponse.success(samples));
-        } catch (Exception e) {
-            logger.error("Error sampling columns: {}", e.getMessage(), e);
-            return ResponseEntity
-                    .status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(ApiResponse.error("Error sampling columns: " + e.getMessage()));
+        if (samples.isEmpty()) {
+            // Create an empty map of the correct type
+            Map<String, List<Object>> emptyResult = new HashMap<>();
+            // Add a message to the logs, but return the empty map
+            logger.warn("None of the requested columns could be found in table {}", tableName);
+            return ResponseEntity.ok(ApiResponse.success(emptyResult));
         }
+
+        return ResponseEntity.ok(ApiResponse.success(samples));
     }
 
     @Operation(summary = "Sample data from multiple tables in parallel")
@@ -273,7 +250,6 @@ public class DatabaseScannerController {
 
     // === Relationship operations ===
 
-
     @Operation(summary = "Get detailed relationships of a table")
     @GetMapping("/connections/{connectionId}/tables/{tableName}/relationships")
     public ResponseEntity<ApiResponse<List<RelationshipMetadata>>> getTableRelationships(
@@ -286,16 +262,6 @@ public class DatabaseScannerController {
                 tableName, connectionId, actualDbType);
         List<RelationshipMetadata> relationships = scannerService.getTableRelationships(actualDbType, connectionId, tableName);
         return ResponseEntity.ok(ApiResponse.success(relationships));
-    }
-
-    // === Error handling ===
-
-    @ExceptionHandler(Exception.class)
-    public ResponseEntity<ApiResponse<String>> handleException(Exception e) {
-        logger.error("Error handling request: {}", e.getMessage(), e);
-        return ResponseEntity
-                .status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(ApiResponse.error("An error occurred: " + e.getMessage()));
     }
 
     // === Utility methods ===
@@ -312,12 +278,6 @@ public class DatabaseScannerController {
             return dbType;
         }
 
-        try {
-            return dataSourceProvider.getDatabaseType(connectionId);
-        } catch (Exception e) {
-            logger.error("Could not auto-detect database type for connection: {}", connectionId, e);
-            throw new IllegalArgumentException(
-                    "The dbType parameter is required because the type could not be detected automatically");
-        }
+        return dataSourceProvider.getDatabaseType(connectionId);
     }
 }

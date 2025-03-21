@@ -1,0 +1,41 @@
+# Configuration spécifique au profil queue
+# Note: Ce fichier n'est pas nécessaire car la configuration est maintenant dans application.yaml
+# Vous pouvez supprimer ce fichier en toute sécurité
+
+# Utilisez cette syntaxe si vous souhaitez conserver ce fichier
+spring:
+  config:
+    activate:
+      on-profile: queue
+
+# Configuration pour le système de file d'attente et parallélisation
+dbscanner:
+  queue:
+    # Capacité maximale des files d'attente
+    capacity: 1000
+    # Taille des lots pour le traitement par lots
+    batch-size: 20
+    # Timeout pour le polling des files d'attente (en millisecondes)
+    poll-timeout: 500
+    # Unité de temps pour le timeout de polling
+    poll-timeout-unit: MILLISECONDS
+
+  # Configuration des threads
+  threads:
+    # Nombre maximum de threads pour le pool principal
+    max-pool-size: 8
+    # Nombre de threads pour les tâches d'échantillonnage
+    sampler-pool-size: 4
+    # Nombre de threads pour la détection PII
+    detector-pool-size: 4
+    # Nombre de consommateurs pour les files d'échantillonnage
+    sampling-consumers: 3
+
+  # Configuration de l'échantillonnage
+  sampling:
+    # Timeout par défaut pour les opérations d'échantillonnage
+    timeout: 30
+    # Unité de temps pour le timeout
+    timeout-unit: SECONDS
+    # Utiliser la file d'attente pour l'échantillonnage (true) ou le parallélisme direct (false)
+    use-queue: true

@@ -32,26 +32,48 @@ dbscanner:
       oracle.jdbc.OracleDriver: com.oracle.database.jdbc:ojdbc8:23.3.0
       com.mysql.cj.jdbc.Driver: mysql:mysql-connector-java:8.0.33
       org.postgresql.Driver: org.postgresql:postgresql:42.7.1
-  threads:
-    max-pool-size: 10
+
+  # Configuration pour le système de file d'attente
   queue:
+    # Capacité maximale des files d'attente
+    capacity: 1000
+    # Taille des lots pour le traitement par lots
     batch-size: 20
+    # Timeout pour le polling des files d'attente (en millisecondes)
+    poll-timeout: 500
+    # Unité de temps pour le timeout de polling
+    poll-timeout-unit: MILLISECONDS
+
+  # Configuration des threads
+  threads:
+    # Nombre maximum de threads pour le pool principal
+    max-pool-size: 8
+    # Nombre de threads pour les tâches d'échantillonnage
+    sampler-pool-size: 4
+    # Nombre de consommateurs pour les files d'échantillonnage
+    sampling-consumers: 3
+
+  # Configuration de l'échantillonnage
   sampling:
-    parallel-enabled: true
+    # Timeout par défaut pour les opérations d'échantillonnage
     timeout: 30
+    # Unité de temps pour le timeout
     timeout-unit: SECONDS
+    # Utiliser la file d'attente pour l'échantillonnage (true) par défaut
+    use-queue: true
 
 # PII Detector Configuration
 piidetector:
   threads:
-    max-pool-size: 10
-  sampling:
-    limit: 10
+    # Nombre maximum de threads pour la détection PII
+    max-pool-size: 8
+    # Timeout pour l'arrêt des threads (en secondes)
+    shutdown-timeout: 10
   confidence:
     threshold: 0.55
   ner:
     service:
-      url: https://021b-34-74-84-228.ngrok-free.app/ner
+      url: https://44e3-104-196-239-15.ngrok-free.app/ner
       timeout: 30
   strategy:
     heuristic:
