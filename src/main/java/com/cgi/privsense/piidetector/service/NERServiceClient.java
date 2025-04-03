@@ -11,15 +11,10 @@ import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
-import javax.net.ssl.HttpsURLConnection;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
 import java.io.IOException;
 import java.net.HttpURLConnection;
-import java.security.KeyManagementException;
-import java.security.NoSuchAlgorithmException;
-import java.security.cert.X509Certificate;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -33,6 +28,7 @@ public class NERServiceClient {
 
     private final String nerServiceUrl;
     private final RestTemplate restTemplate;
+    private final boolean isLocalService;
 
     // Cache for NER results to avoid redundant calls
     private final Map<String, Map<String, Double>> nerResultsCache = new ConcurrentHashMap<>();
@@ -41,16 +37,47 @@ public class NERServiceClient {
      * Constructor
      *
      * @param nerServiceUrl NER service URL
+     * @param trustAllCerts Whether to trust all certificates (default: false)
      */
     public NERServiceClient(
-            @Value("${piidetector.ner.service.url}") String nerServiceUrl) {
+            @Value("${piidetector.ner.service.url}") String nerServiceUrl,
+            @Value("${piidetector.ner.trust.all.certs:false}") boolean trustAllCerts) {
 
         this.nerServiceUrl = nerServiceUrl;
+        this.isLocalService = isLocalService(nerServiceUrl);
 
-        // Create a RestTemplate that ignores SSL checks for development
-        this.restTemplate = createTrustAllRestTemplate();
+        // Create an appropriate RestTemplate based on whether this is a local service
+        if (isLocalService && !trustAllCerts) {
+            // Standard RestTemplate for local services
+            SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
+            requestFactory.setConnectTimeout(5000);  // 5 seconds
+            requestFactory.setReadTimeout(30000);    // 30 seconds
+            this.restTemplate = new RestTemplate(requestFactory);
+            log.info("Using standard RestTemplate for local service at: {}", nerServiceUrl);
+        } else {
+            // Trust all RestTemplate for non-local services or if explicitly requested
+            this.restTemplate = createStandardRestTemplate();
+            log.info("Using standard RestTemplate with normal SSL handling for: {}", nerServiceUrl);
+        }
 
         log.info("NER Service Client initialized with URL: {}", nerServiceUrl);
+    }
+
+    /**
+     * Determine if the service URL is local
+     *
+     * @param url The service URL
+     * @return true if local, false otherwise
+     */
+    private boolean isLocalService(String url) {
+        try {
+            URI uri = new URI(url);
+            String host = uri.getHost();
+            return host == null || host.equals("localhost") || host.equals("127.0.0.1") || host.startsWith("192.168.") || host.startsWith("10.");
+        } catch (URISyntaxException e) {
+            log.warn("Invalid URI syntax for service URL: {}", url);
+            return false;
+        }
     }
 
     /**
@@ -229,61 +256,23 @@ public class NERServiceClient {
     }
 
     /**
-     * Creates a RestTemplate that trusts all SSL certificates.
-     * Uses SimpleClientHttpRequestFactory to avoid dependencies on HttpComponents.
-     *
-     * For development use only.
+     * Creates a standard RestTemplate with reasonable timeouts.
      *
      * @return Configured RestTemplate
      */
-    private RestTemplate createTrustAllRestTemplate() {
-        try {
-            // Create a trust manager that accepts all certificates
-            TrustManager[] trustAllCerts = new TrustManager[]{
-                    new X509TrustManager() {
-                        public X509Certificate[] getAcceptedIssuers() { return null; }
-                        public void checkClientTrusted(X509Certificate[] certs, String authType) {}
-                        public void checkServerTrusted(X509Certificate[] certs, String authType) {}
-                    }
-            };
-
-            // Create and initialize an SSL context that doesn't validate certificates
-            SSLContext sslContext = SSLContext.getInstance("TLS");
-            sslContext.init(null, trustAllCerts, new java.security.SecureRandom());
-
-            // Create a custom factory that configures HTTPS connections
-            SimpleClientHttpRequestFactory requestFactory = new TrustAllHostnamesRequestFactory(sslContext);
-            requestFactory.setConnectTimeout(5000);  // 5 seconds
-            requestFactory.setReadTimeout(30000);    // 30 seconds
-
-            log.info("RestTemplate configured to ignore SSL checks");
-            return new RestTemplate(requestFactory);
-        } catch (NoSuchAlgorithmException | KeyManagementException e) {
-            log.error("Error while configuring secure RestTemplate: ", e);
-            log.warn("Using default RestTemplate which might fail with untrusted certificates");
-            return new RestTemplate();
-        }
-    }
-
-    /**
-     * HTTP request factory that ignores SSL and hostname verifications.
-     */
-    private static class TrustAllHostnamesRequestFactory extends SimpleClientHttpRequestFactory {
-        private final SSLContext sslContext;
-
-        public TrustAllHostnamesRequestFactory(SSLContext sslContext) {
-            this.sslContext = sslContext;
-        }
-
-        @Override
-        protected void prepareConnection(HttpURLConnection connection, String httpMethod) throws IOException {
-            if (connection instanceof HttpsURLConnection) {
-                HttpsURLConnection httpsConnection = (HttpsURLConnection) connection;
-                httpsConnection.setSSLSocketFactory(sslContext.getSocketFactory());
-                httpsConnection.setHostnameVerifier((hostname, session) -> true);
+    private RestTemplate createStandardRestTemplate() {
+        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory() {
+            @Override
+            protected void prepareConnection(HttpURLConnection connection, String httpMethod) throws IOException {
+                super.prepareConnection(connection, httpMethod);
             }
-            super.prepareConnection(connection, httpMethod);
-        }
+        };
+
+        // Set reasonable timeouts
+        requestFactory.setConnectTimeout(5000);  // 5 seconds
+        requestFactory.setReadTimeout(30000);    // 30 seconds
+
+        return new RestTemplate(requestFactory);
     }
 
     /**
@@ -301,5 +290,13 @@ public class NERServiceClient {
             log.warn("NER service not available: {}", e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * Clears the NER results cache.
+     */
+    public void clearCache() {
+        nerResultsCache.clear();
+        log.info("NER results cache cleared");
     }
 }

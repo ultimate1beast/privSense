@@ -73,7 +73,7 @@ piidetector:
     threshold: 0.55
   ner:
     service:
-      url: https://44e3-104-196-239-15.ngrok-free.app/ner
+      url: http://127.0.0.1:5000/ner
       timeout: 30
   strategy:
     heuristic:
